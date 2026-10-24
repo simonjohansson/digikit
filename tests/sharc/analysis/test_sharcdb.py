@@ -31,6 +31,7 @@ from support.sharc_encode import (  # noqa: E402
 from tools.sharc_dev import (
     sharc,  # noqa: E402
     sharc_disasm,  # noqa: E402
+    sharc_run,  # noqa: E402
     sharcdb,  # noqa: E402
     sharcfn,  # noqa: E402
     sharcinv,  # noqa: E402
@@ -240,8 +241,7 @@ class ExtractMemAccessTest(unittest.TestCase):
 
     def test_indexed_3b_and_3d_widths_are_decoded_not_none(self):
         # Type3b (l=1,x=0,w=0 -> short-word, PRM pp.13-16--13-19) and
-        # Type3d (w=0,ex=0 -> normal-word, its base ACCESS form, PRM
-        # pp.322-325) previously always recorded width=None here.
+        # Type3d uses the same byte/short ACCESS widths (PRM pp.322-325).
         insn_3b = insn_at(
             field_insn("3b", u=0, i=0, m=0, cond=31, g=0, d=0, l=1, ureg=0, w=0, x=0)
         )
@@ -254,7 +254,7 @@ class ExtractMemAccessTest(unittest.TestCase):
             )
         )
         f_3d = sharcinv.merge_fields(insn_3d.fields)
-        self.assertEqual(sharcdb.extract_mem_access("3d", f_3d)[0][6], "normal-word")
+        self.assertEqual(sharcdb.extract_mem_access("3d", f_3d)[0][6], "byte")
 
 
 class PtrMemFormTest(unittest.TestCase):
@@ -270,6 +270,134 @@ class PtrMemFormTest(unittest.TestCase):
         self.assertEqual((base_reg, address, direction), ("I4", 0x2000, "store"))
         self.assertEqual(width, "byte")
         self.assertEqual(new_values, {})
+
+
+class IndexedAccessRegressionTest(unittest.TestCase):
+    def test_byte_and_short_pointer_math_matches_executed_accesses(self):
+        base, pc = 0x20090004, 0x1C1000
+        data = bytes.fromhex("0000000080feabcd00000000")
+        for form in ("3b", "3d"):
+            for length_bit, x, width, size, value in (
+                (0, 0, "byte", 1, 128),
+                (0, 1, "byte-sign-extended", 1, -128),
+                (1, 0, "short-word", 2, 65152),
+                (1, 1, "short-word-sign-extended", 2, -384),
+            ):
+                for modifier in (-1, 1):
+                    with self.subTest(form=form, width=width, modifier=modifier):
+                        fields = dict(
+                            u=1,
+                            i=0,
+                            m=6,
+                            cond=31,
+                            g=0,
+                            d=0,
+                            l=length_bit,
+                            ureg=1,
+                            w=0,
+                            x=x,
+                        )
+                        if form == "3d":
+                            fields["ex"] = 0
+                        code = field_insn(form, **fields)
+                        mem = sharcldr.LoadedMemory.from_stream(
+                            boot_block(
+                                0, sharcldr.sw_to_byte(pc), len(code), payload=code
+                            )
+                            + boot_block(0, base - 4, len(data), payload=data)
+                        )
+                        runner = sharc_run.Runner(
+                            mem,
+                            start=pc,
+                            regs={"I0": base, "M6": modifier, "MODE1": 0, "L0": 0},
+                            watchpoints=[
+                                sharc_run.Watchpoint(base, base + 4, stop=False)
+                            ],
+                        )
+                        runner.step()
+                        self.assertEqual(
+                            runner.state.uregs[1].value & 0xFFFFFFFF, value & 0xFFFFFFFF
+                        )
+                        self.assertEqual(len(runner.watch_log), size)
+                        self.assertEqual(
+                            sharcdb.extract_mem_access(form, fields)[0][6], width
+                        )
+                        updates, row = sharcdb._ptr_mem_form(
+                            form, fields, {"I0": base, "M6": modifier}, {}
+                        )
+                        self.assertEqual(row[2], base)
+                        self.assertEqual(row[4], width)
+                        self.assertEqual(updates["I0"], runner.state.uregs[16].value)
+                        self.assertEqual(updates["I0"], base + modifier * size)
+
+    def test_pre_modify_and_dag_bank(self):
+        for form in ("3b", "3d"):
+            fields = dict(u=0, i=4, m=6, g=1, d=0, l=1, x=1, w=0, ex=0)
+            updates, row = sharcdb._ptr_mem_form(
+                form, fields, {"I12": 0x20090004, "M14": -1}, {}
+            )
+            self.assertEqual(updates, {})
+            self.assertEqual(row[:3], ("I12", 0x20090004, 0x20090002))
+
+    def test_long_word_steps_in_normal_word_units(self):
+        fields = dict(u=1, i=0, m=6, g=0, d=0, l=1, x=1, w=1)
+        updates, row = sharcdb._ptr_mem_form(
+            "3b", fields, {"I0": 0x20090000, "M6": 1}, {}
+        )
+        self.assertEqual(updates, {"I0": 0x20090004})
+        self.assertEqual(row[4], "long-word")
+
+    def test_unsupported_type3d_does_not_invent_pointer_stride(self):
+        fields = dict(u=1, i=4, m=6, g=1, d=0, l=1, x=1, w=1, ex=0)
+        state = {"I12": 0x20090000, "M14": 1}
+        from tools.sharc_dev.sharcdb.pointers import _ptr_exec
+
+        _ptr_exec("3d", fields, state, {})
+        self.assertIsNone(state.get("I12"))
+        width = sharcdb.extract_mem_access("3d", fields)[0][6]
+        self.assertTrue(width.startswith("unknown("))
+        # Exclusive WACCESS metadata is still descriptive; execution remains unsupported.
+        fields["ex"] = 1
+        self.assertEqual(sharcdb.extract_mem_access("3d", fields)[0][6], "long-word")
+
+    def test_unknown_modifier_invalidates_banked_post_modify(self):
+        from tools.sharc_dev.sharcdb.pointers import _ptr_exec
+
+        fields = dict(u=1, i=4, m=6, g=1, d=0, l=1, x=1, w=0, ex=0)
+        state = {"I12": 0x20090000}
+        _ptr_exec("3d", fields, state, {})
+        self.assertIsNone(state.get("I12"))
+
+    def test_query_uses_byte_short_and_long_footprints(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as work:
+            path = os.path.join(work, "synthetic.sqlite")
+            db = sqlite3.connect(path)
+            db.execute("CREATE TABLE meta(image,key,value)")
+            db.execute(
+                "CREATE TABLE ptr(image,sw,base_reg,base_value,address,direction,width)"
+            )
+            for sw, width in enumerate(
+                ("byte", "short-word-sign-extended", "long-word"), 1
+            ):
+                db.execute(
+                    "INSERT INTO ptr VALUES(?,?,?,?,?,?,?)",
+                    ("synthetic", sw, "I0", 0x20090000, 0x20090000, "load", width),
+                )
+            db.commit()
+            db.close()
+            image = sharc.Image("synthetic", path, None)
+            try:
+                self.assertEqual(
+                    {r["sw"] for r in image.readers(0x20090001, 1)}, {"0x2", "0x3"}
+                )
+                self.assertEqual(
+                    {r["sw"] for r in image.readers(0x20090007, 1)}, {"0x3"}
+                )
+                self.assertEqual(image.readers(0x20090008, 1), [])
+            finally:
+                image.close()
 
 
 class ClassifyLiteralRangeTest(unittest.TestCase):
@@ -402,6 +530,18 @@ class SyntheticBuildTest(unittest.TestCase):
             self.assertTrue(stats2["skipped"])
             _stream_path, out_path, stats3 = self._build(tmp, force=True)
             self.assertFalse(stats3["skipped"])
+
+    def test_old_width_facts_rebuild_then_cache_the_new_version(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _stream, path, _stats = self._build(tmp)
+            with sqlite3.connect(path) as db:
+                db.execute("UPDATE meta SET value='16' WHERE key='db_version'")
+            _stream, _path, rebuilt = self._build(tmp)
+            self.assertFalse(rebuilt["skipped"])
+            _stream, _path, reused = self._build(tmp)
+            self.assertTrue(reused["skipped"])
 
     def test_unknown_image_without_known_code_blocks_requires_override(self):
         import tempfile

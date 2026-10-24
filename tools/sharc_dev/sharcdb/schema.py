@@ -11,11 +11,14 @@ from tools.sharc_dev import sharcinv
 # Names tools/sharc_dev (the parent of this package), as before the split.
 _here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-DB_VERSION = 16
+DB_VERSION = 17
 
 # Bump DB_VERSION whenever the schema or the semantics of an existing column
 # change, so build_database()'s skip-rebuild check (sha256 + DB_VERSION) does
 # the right thing on the next run.
+# v17 fixes Type3d ACCESS widths and indexed byte/short modifier scaling;
+# cached mem_access/ptr facts must rebuild even though table columns are unchanged.
+#
 # v16 also resolves a 2b/2c collision whose short reading is clean once its
 # own successors are width-resolved (sharc_disasm._resolved_reach_clean).
 # v15 also retries unresolved 2b/2c collisions through a bounded later

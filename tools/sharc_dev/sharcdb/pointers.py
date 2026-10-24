@@ -9,8 +9,9 @@ import json
 import networkx as nx
 
 from tools.sharc_dev import sharcfn, sharcinv
+from tools.sharc_dev.sharc_core.memory import _access_modifier_scale
 
-from .facts import _immoff_width, extract_literal
+from .facts import _immoff_width, extract_literal, extract_mem_access
 from .regdefs import register_effects
 
 # --- constant-pointer propagation (`ptr` table, DB_VERSION 6) --------------
@@ -298,15 +299,34 @@ def _ptr_mem_form(t, f, state, frame):
         base_value, mod_value = state.get(base_reg), state.get(mod_reg)
         if base_value is None:
             return {}, None
-        if u:
-            new_values = {}
-            if mod_value is not None:
-                new_values[base_reg] = (base_value + mod_value * 4) & 0xFFFFFFFF
-            return new_values, (base_reg, base_value, base_value, direction, "word")
-        address = (
-            (base_value + mod_value * 4) & 0xFFFFFFFF if mod_value is not None else None
+        width = (
+            extract_mem_access(t, f)[0][6]
+            if t in ("3b", "3d")
+            else ("long" if f.get("l") else "word")
         )
-        return {}, (base_reg, base_value, address, direction, "word")
+        if width is None or width.startswith("unknown("):
+            # Unknown post-modify must invalidate the bank-adjusted I register too.
+            return ({base_reg: None} if u else {}), (
+                base_reg,
+                base_value,
+                base_value if u else None,
+                direction,
+                width,
+            )
+        access_width = {"word": "normal-word", "long": "long-word"}.get(width, width)
+        # Retain this pass's byte-address/NW32 assumption; (lw) also steps by four.
+        scale = _access_modifier_scale(access_width, True)
+        if u:
+            new_values = {base_reg: None}
+            if mod_value is not None:
+                new_values[base_reg] = (base_value + mod_value * scale) & 0xFFFFFFFF
+            return new_values, (base_reg, base_value, base_value, direction, width)
+        address = (
+            (base_value + mod_value * scale) & 0xFFFFFFFF
+            if mod_value is not None
+            else None
+        )
+        return {}, (base_reg, base_value, address, direction, width)
 
     if t in sharcfn.IMMOFF_MEM_FORMS:
         base_reg = _ptr_bank_reg("I", f.get("i", 0), f)

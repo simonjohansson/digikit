@@ -126,26 +126,16 @@ def _type14d_width(f: dict):
 
 
 def _type3d_width(f: dict):
-    """Type3d access width from its w/ex/l/x bits (sharc-plus-prm pp.322-
-    325, Figure 13-9's opcode fields and the w/cond opcode-field table plus
-    the ACCESS/BH/BHSE/EX/LWEX encode tables that follow it). w=0 selects
-    the ACCESS group: ex=0 is the plain 48-bit re-encoding of Type3a
-    (normal-word, l/x not used by that table); ex=1 is BH/BHSE, whose l/x
-    rows are byte/short(-sign-extended) exactly like sharc_trace.
-    ACCESS_WIDTHS' w=0 slice. w=1 selects WACCESS, which the opcode table
-    only gives a row for ex=1 (EX at l=0: plain word exclusive; LWEX at
-    l=1: long-word exclusive) -- w=1,ex=0 has no row, the same undocumented
-    gap tools/sharc_dev/sharc_trace.py's "14d" branch calls out for that combination.
-    tools/sharc_dev/sharc_trace.py has no "3d" _execute branch to cross-check
-    against (decode_table.json also flags Type3d with unconfirmed_bits=7),
-    so this is derived from the manual alone."""
+    """ACCESS uses BH/BHSE l/x widths even with ex=0 (PRM pp.13-22--13-25).
+
+    WACCESS/exclusive widths are descriptive only; the executor still stops
+    on unsupported monitor semantics or reserved combinations.
+    """
     w, ex, l, x = f.get("w", 0), f.get("ex", 0), f.get("l", 0), f.get("x", 0)  # noqa: E741
     if w:
         if not ex:
             return "unknown(w=1,ex=0,l=%d,x=%d)" % (l, x)
         return "long-word" if l else "normal-word"
-    if not ex:
-        return "normal-word"
     return ACCESS_WIDTHS[(l, x, 0)]
 
 

@@ -1043,7 +1043,10 @@ class Image:
             "SELECT sw, base_reg, base_value, address, width, "
             "  CASE WHEN address IS NOT NULL THEN 'resolved' ELSE 'base_only' END kind "
             "FROM ptr WHERE image=? AND direction=? AND ("
-            "  (address IS NOT NULL AND address < ? AND address + (CASE width WHEN 'long' THEN 8 ELSE 4 END) > ?)"
+            "  (address IS NOT NULL AND address < ? AND address + (CASE width "
+            "WHEN 'byte' THEN 1 WHEN 'byte-sign-extended' THEN 1 "
+            "WHEN 'short-word' THEN 2 WHEN 'short-word-sign-extended' THEN 2 "
+            "WHEN 'long' THEN 8 WHEN 'long-word' THEN 8 ELSE 4 END) > ?)"
             "  OR (address IS NULL AND base_value IS NOT NULL AND base_value <= ? AND ? - base_value < 0x10000)"
             ") ORDER BY sw",
             (self.name, direction, hi, addr, addr, addr),
