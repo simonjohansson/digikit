@@ -1520,3 +1520,70 @@ refused form or a negative count.
 **Open [O].** The other Selache forms with an immediate have not been compared byte for byte with stock. The external
 project's rule fits: "decodes the same" is not proof of an encoding; compare the exact bytes with stock for every instruction
 form that carries an immediate.
+
+
+## Indexed access widths and constant-pointer strides (2026-10-24) **[V][C]**
+
+The static index at `38dfbe4a` mislabeled Type3d `w=0,ex=0` as normal-word,
+ignoring `l/x`, although the concrete executor already used the byte/halfword
+ACCESS table. Fix `3ed5849c` aligns the analysis with that table, scales
+indexed byte/short modifiers by 1/2, and invalidates an unknown post-modify
+in the selected DAG bank. Normal/long-word stride remains 4 in the existing
+byte-coordinate/NW32 analysis; long-word footprint is 8. Reader/writer
+queries now use the corresponding byte/short/long footprints. Unsupported
+exclusive forms retain unknown metadata; execution support is unchanged.
+Cache version 17 forces old derived facts to rebuild; SQLite columns and
+DDL are identical to version 16. The owner approved this cache invalidation.
+
+**Exact-stock counterexample [V].** DN2 OS 1.12 SHA-256
+`7e5b8a733d4ab1fdf7e5d22757f7d8eddaa3cbf71d0858874a791844c02ceb35`,
+decoded section 7 SHA-256
+`336e340aa0cdcd34e314cfa44849f709a3134f6bd4cd57dfc7e15702c83115e2`:
+PC16 `0x1c78b9` is Type3d `w=0,ex=0,l=1,x=1`. The corrected index reports
+`short-word-sign-extended`. A bounded SISD load seeded with
+`I0=0x804aa2e0,M6=1,L0=0,MODE1=0` reads 6,336 and advances I0 by 2;
+the next element is 8,201. Their packed uint32 equals `0x200918c0`.
+Descriptor `{0x804a9908,4800}` at loader `0x28266e00` identifies this pair
+as elements 1260/1261 of a signed-halfword table for this consumer. A second
+agent independently checked the exact image bytes, fields and descriptor,
+and reviewed the corrected index and representative changed addresses.
+This establishes that consumer's data flow, not every possible reader.
+
+**Rebuilt index [V].** A fresh database records `tool_commit=3ed5849c`,
+version 17 and the exact decoded hash above. It contains 138,299 instructions,
+1,078 functions, 13,356 datarefs, 27,324 memory-access rows and 3,171 pointer
+rows (2,979 resolved, 192 unresolved). Compared with version 16, 395 pointer
+rows change, including 33 with a changed base or address (32 changed
+addresses). Neither the bounded app `[0x20090000,0x20098000)` nor the larger
+examined tail `[0x20088240,0x200fa000)` has direct-footprint overlaps,
+datarefs, resolved-pointer overlaps or reader/writer query matches. A
+second build reuses the version-17 cache. An independent read-only comparison
+confirmed the metadata, hashes, DDL, counts, row delta and range queries.
+
+**Coverage [O].** The index still has 25,878 indirect memory accesses;
+constant propagation covers only a subset. Byte-coordinate/NW32 assumptions,
+unknown-width query fallback of four bytes, SIMD/circular/runtime aliases
+and physical cache/interrupt behavior remain limitations. Zero matches do
+not establish global memory ownership. Canary checkpoints miss reads,
+same-value writes and overwrite/restore. These results support only the
+existing experimental 32 KiB reservation; they do not expand it.
+
+**Checks.** `test_sharcdb.py`: 72 passed, 32 skipped, 16 subtests passed;
+the skips require unavailable firmware/Ghidra/private inputs. New regressions
+cover byte/short signs, positive/negative and pre/post modifiers, banked
+unknown invalidation, long stride versus footprint, query boundaries and
+cache invalidation/reuse. Changed-file Ruff/format and `sharc.py` mypy pass.
+The routed tests report 247 passed, one failed and 127 skipped. The required
+pre-check is not globally green: untouched main reproduces host-dependent
+DSP-object tool hashes ([#54](https://github.com/simonjohansson/elekloader/issues/54))
+and 250 stale path references ([#55](https://github.com/simonjohansson/elekloader/issues/55)).
+Neither generated objects nor those checks were changed. No firmware/runtime
+or hardware cycle was changed or tested in this correction.
+
+Tracking: [#53](https://github.com/simonjohansson/elekloader/issues/53),
+[bounded delivery #51](https://github.com/simonjohansson/elekloader/issues/51),
+[stock-project follow-up #56](https://github.com/simonjohansson/elekloader/issues/56).
+Private reports/indexes are under
+`/Users/simonjohansson/src/elekloader-sharc/out/sharc53-20261024/`;
+`audit-report.json` and `ptr-changes.json` contain the full comparison.
+No stock bytes, derived images or databases are distributed.
